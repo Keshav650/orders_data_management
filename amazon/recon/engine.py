@@ -145,6 +145,21 @@ def report(db, start=None, end=None, as_of=None, mode='mature', sku=None, skus=N
             if oid not in all_db_order_ids:
                 unmatched_trans.append(t)
 
+    # Deduplicate: if an order has both 'Released' and 'Deferred' versions of the same transaction, filter out the Deferred version
+    for oid in list(order_trans.keys()):
+        raw_list = order_trans[oid]
+        has_released = any(t.get('status') == 'Released' for t in raw_list)
+        has_deferred = any(t.get('status') == 'Deferred' for t in raw_list)
+        if has_released and has_deferred:
+            released_keys = {
+                (t['type'], t.get('sku') or '', t.get('description') or '', t['post_date'], t['total'])
+                for t in raw_list if t.get('status') == 'Released'
+            }
+            order_trans[oid] = [
+                t for t in raw_list
+                if not (t.get('status') == 'Deferred' and (t['type'], t.get('sku') or '', t.get('description') or '', t['post_date'], t['total']) in released_keys)
+            ]
+
     # Returns lookup
     returns_rows = [dict(r) for r in db.execute('SELECT * FROM returns ORDER BY return_date')]
     order_returns = defaultdict(list)
@@ -702,6 +717,17 @@ def report(db, start=None, end=None, as_of=None, mode='mature', sku=None, skus=N
 def order_detail(db, order_id):
     order_rows = [dict(r) for r in db.execute('SELECT * FROM orders WHERE amazon_order_id=?', (order_id,))]
     trans_rows = [dict(r) for r in db.execute('SELECT * FROM transactions WHERE order_id=? ORDER BY post_date', (order_id,))]
+    has_released = any(t.get('status') == 'Released' for t in trans_rows)
+    has_deferred = any(t.get('status') == 'Deferred' for t in trans_rows)
+    if has_released and has_deferred:
+        released_keys = {
+            (t['type'], t.get('sku') or '', t.get('description') or '', t['post_date'], t['total'])
+            for t in trans_rows if t.get('status') == 'Released'
+        }
+        trans_rows = [
+            t for t in trans_rows
+            if not (t.get('status') == 'Deferred' and (t['type'], t.get('sku') or '', t.get('description') or '', t['post_date'], t['total']) in released_keys)
+        ]
     returns_rows = [dict(r) for r in db.execute('SELECT * FROM returns WHERE order_id=? ORDER BY return_date', (order_id,))]
     recoveries = [dict(r) for r in db.execute('SELECT * FROM recovery_events WHERE order_id=? ORDER BY effective_date, id', (order_id,))]
     return {

@@ -308,8 +308,14 @@ def parse_file(name, payload, kind=None, effective_date='0001-01-01'):
                     'release_date': release_date
                 }
                 table = 'transactions'
-                # Uniquely identify the transaction row
-                fp = digest(['transactions', settlement_id, t_type, order_id, sku, description, post_date, total_paise])
+                # Uniquely identify the transaction row.
+                # For order-level transactions, settlement_id changes when Amazon moves a transaction from 'Deferred'
+                # to 'Released'. Exclude settlement_id for order transactions so the released payout updates the deferred record
+                # instead of duplicating it.
+                if order_id:
+                    fp = digest(['transactions', t_type, order_id, sku or '', description or '', post_date or '', total_paise or 0])
+                else:
+                    fp = digest(['transactions', settlement_id or '', t_type or '', sku or '', description or '', post_date or '', total_paise or 0])
 
             elif kind == 'returns':
                 order_id = text(raw_dict.get('Order ID', raw_dict.get('order id')))
@@ -534,7 +540,16 @@ def commit_file(db, parsed):
             data = dict(record, fingerprint=fp, import_id=import_id, raw=raw)
             keys = list(data.keys())
             placeholders = ','.join('?' for _ in keys)
-            updates = ','.join(f'{k}=excluded.{k}' for k in keys if k != 'fingerprint')
+            update_clauses = []
+            for k in keys:
+                if k == 'fingerprint':
+                    continue
+                # Never downgrade an already 'Released' transaction back to 'Deferred' if an older report is re-imported
+                if k in ('status', 'settlement_id', 'release_date'):
+                    update_clauses.append(f'{k}=CASE WHEN transactions.status="Released" THEN transactions.{k} ELSE excluded.{k} END')
+                else:
+                    update_clauses.append(f'{k}=excluded.{k}')
+            updates = ','.join(update_clauses)
             db.execute(
                 f'INSERT INTO transactions({",".join(keys)}) VALUES ({placeholders}) ON CONFLICT(fingerprint) DO UPDATE SET {updates}',
                 tuple(data.values())

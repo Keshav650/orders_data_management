@@ -269,6 +269,52 @@ class AmazonReconciliationTests(unittest.TestCase):
         self.assertEqual(s_sku['service_fees'], 0)
         self.assertEqual(s_sku['net_profit'], 14000)
 
+    def test_deferred_to_released_transaction_not_duplicated(self):
+        # 1. Order record
+        self.db.execute(
+            "INSERT INTO orders(order_item_id, amazon_order_id, purchase_date, order_status, sku, quantity, item_price, raw) "
+            "VALUES ('item_402', '402-3017814-3391500', '2026-10-15', 'DELIVERED', 'BS-LC-NL-WH', 1, 42900, '{}')"
+        )
+        # 2. Deferred transaction row with temporary settlement ID 28069360372
+        csv_deferred = (
+            "settlement id,date/time,type,order id,sku,description,quantity,marketplace,account type,fulfillment,order city,order state,order postal,product sales,shipping credits,gift wrap credits,promotional rebates,Total sales tax liable(GST before adjusting TCS),TCS-CGST,TCS-SGST,TCS-IGST,TDS (Section 194-O),selling fees,fba fees,other transaction fees,other,total,Transaction Status\n"
+            "28069360372,2026-10-16 04:30:00,Order,402-3017814-3391500,BS-LC-NL-WH,Nail Lamp,1,amazon.in,Electronic,Merchant,NELLORE,ANDHRA PRADESH,524002,363.56,0,0,0,65.44,0,0,-1.82,0,0,0,-27.14,0,400.04,Deferred\n"
+            "28069360372,2026-10-16 04:30:00,Shipping Services,402-3017814-3391500,,Easy Ship weight handling fees,0,Amazon.in,Electronic,Merchant,,,,0,0,0,0,0,0,0,0,0,0,0,-64.90,0,-64.90,Deferred\n"
+        )
+        parsed_def = parse_file('deferred.csv', csv_deferred.encode('utf-8'), kind='transactions')
+        commit_file(self.db, parsed_def)
+        self.db.commit()
+
+        # Check report when transactions are Deferred
+        rep1 = report(self.db, mode='all')
+        o1 = next(o for o in rep1['orders'] if o['amazon_order_id'] == '402-3017814-3391500')
+        self.assertEqual(o1['settlement'], 33514)
+        self.assertEqual(o1['payment_count'], 2)
+
+        # 3. Later report with same transactions Released under new payout settlement ID 28172139082
+        csv_released = (
+            "settlement id,date/time,type,order id,sku,description,quantity,marketplace,account type,fulfillment,order city,order state,order postal,product sales,shipping credits,gift wrap credits,promotional rebates,Total sales tax liable(GST before adjusting TCS),TCS-CGST,TCS-SGST,TCS-IGST,TDS (Section 194-O),selling fees,fba fees,other transaction fees,other,total,Transaction Status,Transaction Release Date\n"
+            "28172139082,2026-10-16 04:30:00,Order,402-3017814-3391500,BS-LC-NL-WH,Nail Lamp,1,amazon.in,Electronic,Merchant,NELLORE,ANDHRA PRADESH,524002,363.56,0,0,0,65.44,0,0,-1.82,0,0,0,-27.14,0,400.04,Released,2026-10-29\n"
+            "28172139082,2026-10-16 04:30:00,Shipping Services,402-3017814-3391500,,Easy Ship weight handling fees,0,Amazon.in,Electronic,Merchant,,,,0,0,0,0,0,0,0,0,0,0,0,-64.90,0,-64.90,Released,2026-10-28\n"
+        )
+        parsed_rel = parse_file('released.csv', csv_released.encode('utf-8'), kind='transactions')
+        commit_file(self.db, parsed_rel)
+        self.db.commit()
+
+        # Database must have updated in-place without duplicating records
+        t_rows = self.db.execute("SELECT status, settlement_id, total FROM transactions WHERE order_id='402-3017814-3391500'").fetchall()
+        self.assertEqual(len(t_rows), 2)
+        for tr in t_rows:
+            self.assertEqual(tr['status'], 'Released')
+            self.assertEqual(tr['settlement_id'], '28172139082')
+
+        # Report must NOT double-count settlement
+        rep2 = report(self.db, mode='all')
+        o2 = next(o for o in rep2['orders'] if o['amazon_order_id'] == '402-3017814-3391500')
+        self.assertEqual(o2['settlement'], 33514)  # 400.04 - 64.90 = 335.14, not 670.28!
+        self.assertEqual(o2['product_sales'], 36356)
+        self.assertEqual(o2['payment_count'], 2)
+
 
 if __name__ == '__main__':
     unittest.main()

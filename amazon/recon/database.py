@@ -251,5 +251,33 @@ def connect(path):
         if display:
             key = ' '.join(display.split()).casefold()
             db.execute('INSERT OR IGNORE INTO products(sku, display_sku) VALUES (?,?)', (key, display))
+
+    # Remove superseded Deferred transactions if a Released version already exists
+    db.execute("""
+        DELETE FROM transactions
+        WHERE status = 'Deferred'
+          AND EXISTS (
+            SELECT 1 FROM transactions t2
+            WHERE t2.order_id = transactions.order_id
+              AND t2.type = transactions.type
+              AND COALESCE(t2.sku, '') = COALESCE(transactions.sku, '')
+              AND COALESCE(t2.description, '') = COALESCE(transactions.description, '')
+              AND t2.total = transactions.total
+              AND t2.post_date = transactions.post_date
+              AND t2.status = 'Released'
+          )
+    """)
+
+    # Normalize fingerprints for existing transactions with order_id
+    rows = db.execute("SELECT fingerprint, type, order_id, sku, description, post_date, total FROM transactions WHERE order_id IS NOT NULL AND order_id != ''").fetchall()
+    updates = []
+    for r in rows:
+        from .importer import digest
+        new_fp = digest(['transactions', r['type'], r['order_id'], r['sku'] or '', r['description'] or '', r['post_date'] or '', r['total'] or 0])
+        if new_fp != r['fingerprint']:
+            updates.append((new_fp, r['fingerprint']))
+    for n_fp, o_fp in updates:
+        db.execute("UPDATE OR IGNORE transactions SET fingerprint=? WHERE fingerprint=?", (n_fp, o_fp))
+
     db.commit()
     return db
