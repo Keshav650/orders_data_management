@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Meesho Ledger · Profit & payments</title>
+  <link rel="stylesheet" href="/style.css"><script src="/app.js" defer></script>
+</head>
+<body>
+  <aside class="sidebar">
+    <a class="brand" href="#dashboard"><span class="brand-icon">m<span>l</span></span><span>Meesho Ledger<small>YOUR BUSINESS, IN BALANCE</small></span></a>
+    <div class="nav-label">WORKSPACE</div>
+    <nav aria-label="Main navigation">
+      <button data-page="dashboard" class="active"><span>◫</span> Overview</button>
+      <button data-page="performance"><span>▥</span> Product Performance</button>
+      <button data-page="orders"><span>▤</span> Orders</button>
+      <button data-page="awaiting"><span>◷</span> Awaiting payment <b id="nav-pending">0</b></button>
+      <button data-page="products"><span>▦</span> Products & costs</button>
+      <button data-page="reconciliation"><span>⇄</span> Reconciliation</button>
+      <button data-page="imports"><span>↥</span> Import files</button>
+    </nav>
+    <div class="sidebar-bottom"><span class="local-dot"></span> Stored on the host computer<p>Your team shares one local database.</p><a href="/api/backup">↓ Download database backup</a></div>
+  </aside>
+  <main>
+    <header class="topbar"><span>WORKSPACE <span class="slash">/</span> <span id="breadcrumb">Overview</span></span><span class="subtle">Meesho · INR</span></header>
+    <div class="workspace">
+      <div class="page-heading"><div><div class="eyebrow">PROFIT & PAYMENT RECONCILIATION</div><h1 id="page-title">Your business, at a glance.</h1><p id="page-description">Understand your earnings, costs, and the payments still to come.</p></div><button class="primary" id="header-import">+ Import files</button></div>
+      <div id="error" role="alert" hidden></div>
+      <section class="filterbar" aria-label="Report dates" id="report-filters">
+        <label>Report view<select id="mode"><option value="mature">Orders aged 21+ days</option><option value="custom">Custom order period</option></select></label>
+        <label>Orders from<input type="date" id="start"></label>
+        <label>Orders through<input type="date" id="end"></label>
+        <label>Payments through<input type="date" id="as-of"></label>
+        <details id="sku-picker" class="sku-picker"><summary id="sku-summary">All SKUs</summary><div class="sku-picker-body"><input type="search" id="sku-search" aria-label="Search SKU filter" placeholder="Search SKUs…"><div id="sku-options"></div><div class="form-row"><button id="apply-skus" class="primary">Apply selection</button><button id="reset-skus">Clear selection</button></div></div></details>
+        <button id="reset-period">Last 30 days</button>
+        <button class="primary" id="apply-filters">Apply dates</button>
+      </section>
+      <div id="content"><div class="empty">Loading your workspace…</div></div>
+      <footer>Meesho Ledger <span>Amounts in INR · Cancelled orders excluded from profit</span></footer>
+    </div>
+  </main>
+  <dialog id="detail-dialog"><div class="dialog-header"><h2 id="dialog-title">Order details</h2><button id="close-dialog" aria-label="Close dialog">×</button></div><div id="dialog-content"></div></dialog>
+  <div id="toast" role="status" hidden></div>
+</body>
+</html>
