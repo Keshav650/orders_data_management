@@ -315,6 +315,36 @@ class AmazonReconciliationTests(unittest.TestCase):
         self.assertEqual(o2['product_sales'], 36356)
         self.assertEqual(o2['payment_count'], 2)
 
+    def test_overlapping_ad_reports_not_duplicated(self):
+        # 1. First report: 30 days (Oct 01 - Oct 30) for Campaign C1, SKU-A, cost = 30000 paise (1000 paise/day)
+        csv1 = (
+            'Campaign Name,Campaign ID,Ad group ID,Advertised product SKU,Date range,Impressions,Clicks,Total cost,Sales,ROAS\n'
+            'Camp1,C1,G1,SKU-A,"Oct 01, 2026 - Oct 30, 2026",1000,50,300.00,1000.00,3.33\n'
+        )
+        parsed1 = parse_file('ads1.csv', csv1.encode('utf-8'), kind='ads_product')
+        commit_file(self.db, parsed1)
+        self.db.commit()
+
+        # Check spend for Oct 10 to Oct 20 (11 days @ 1000/day = 11000 paise)
+        rep1 = report(self.db, start='2026-10-10', end='2026-10-20', mode='custom')
+        self.assertEqual(rep1['summary']['ads'], 11000)
+
+        # 2. Second report: overlapping sliding window (Oct 15 - Nov 13, 30 days), cost = 60000 paise (2000 paise/day)
+        csv2 = (
+            'Campaign Name,Campaign ID,Ad group ID,Advertised product SKU,Date range,Impressions,Clicks,Total cost,Sales,ROAS\n'
+            'Camp1,C1,G1,SKU-A,"Oct 15, 2026 - Nov 13, 2026",2000,100,600.00,2000.00,3.33\n'
+        )
+        parsed2 = parse_file('ads2.csv', csv2.encode('utf-8'), kind='ads_product')
+        commit_file(self.db, parsed2)
+        self.db.commit()
+
+        # Check spend for Oct 10 to Oct 20:
+        # Oct 10-14 (5 days) from Report 1 @ 1000/day = 5000 paise
+        # Oct 15-20 (6 days) from Report 2 @ 2000/day = 12000 paise
+        # Total = 17000 paise (NOT 11000 + 12000 = 23000!)
+        rep2 = report(self.db, start='2026-10-10', end='2026-10-20', mode='custom')
+        self.assertEqual(rep2['summary']['ads'], 17000)
+
 
 if __name__ == '__main__':
     unittest.main()

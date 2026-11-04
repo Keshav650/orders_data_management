@@ -535,42 +535,98 @@ def report(db, start=None, end=None, as_of=None, mode='mature', sku=None, skus=N
             t_day['settlement'] += order_row_settlement
             t_day['listed_value'] += order_row_listed
 
-    # Advertising allocation
-    ads_product_rows = [dict(r) for r in db.execute('SELECT * FROM ads_product WHERE start_date <= ? AND end_date >= ?', (end, start))]
-    allocated_ads = []
-    sku_ad_spend = defaultdict(int)
+    # Advertising allocation: Daily Attribution & Deduplication
+    # When multiple ad reports exist with overlapping date ranges (e.g. 60-day report followed by 30-day report),
+    # each calendar day for a given campaign/SKU is attributed to the latest imported report to prevent double-counting.
+    ads_product_rows = [dict(r) for r in db.execute(
+        'SELECT * FROM ads_product WHERE start_date <= ? AND end_date >= ? ORDER BY import_id ASC, fingerprint ASC',
+        (end, start)
+    )]
+    
+    sku_ad_spend_dec = defaultdict(Decimal)
+    daily_product_alloc = {}
 
     for ad in ads_product_rows:
-        lower = max(ad['start_date'], start)
-        upper = min(ad['end_date'], end, as_of)
-        if lower <= upper:
-            total_days = max(1, (date.fromisoformat(ad['end_date']) - date.fromisoformat(ad['start_date'])).days + 1)
-            overlap_days = max(1, (date.fromisoformat(upper) - date.fromisoformat(lower)).days + 1)
-            alloc_cost = rounded(Decimal(ad['cost']) * overlap_days / total_days)
-            ad['allocated_cost'] = alloc_cost
-            allocated_ads.append(ad)
-            sku_ad_spend[sku_key(ad['sku'])] += alloc_cost
+        s_dt = date.fromisoformat(ad['start_date'])
+        e_dt = date.fromisoformat(ad['end_date'])
+        total_days = max(1, (e_dt - s_dt).days + 1)
+        daily_rate = Decimal(ad['cost']) / Decimal(total_days)
+
+        q_start = max(s_dt, date.fromisoformat(start))
+        q_end = min(e_dt, date.fromisoformat(end), date.fromisoformat(as_of))
+
+        k_sku = sku_key(ad['sku'])
+        camp_id = ad['campaign_id']
+
+        curr = q_start
+        while curr <= q_end:
+            # Latest import_id overwrites earlier import for the same (sku, campaign, calendar day)
+            daily_product_alloc[(k_sku, camp_id, curr.isoformat())] = daily_rate
+            curr += timedelta(days=1)
+
+    for (k_sku, camp_id, d_str), rate in daily_product_alloc.items():
+        sku_ad_spend_dec[k_sku] += rate
+
+    sku_ad_spend = {k: rounded(v) for k, v in sku_ad_spend_dec.items()}
 
     # If SKU filter active, ad spend is filtered to selected SKUs
     if selected_skus:
-        total_ad_spend = sum(sku_ad_spend[k] for k in selected_skus)
+        total_ad_spend = sum(sku_ad_spend.get(k, 0) for k in selected_skus)
     else:
-        total_ad_spend = sum(a['allocated_cost'] for a in allocated_ads)
+        total_ad_spend = sum(sku_ad_spend.values())
         # Fallback to campaign ads if no product ads exist
         if not total_ad_spend:
-            camp_rows = [dict(r) for r in db.execute('SELECT * FROM ads_campaign WHERE start_date <= ? AND end_date >= ?', (end, start))]
+            camp_rows = [dict(r) for r in db.execute(
+                'SELECT * FROM ads_campaign WHERE start_date <= ? AND end_date >= ? ORDER BY import_id ASC, fingerprint ASC',
+                (end, start)
+            )]
+            daily_camp_alloc = {}
             for c in camp_rows:
-                lower = max(c['start_date'], start)
-                upper = min(c['end_date'], end, as_of)
-                if lower <= upper:
-                    total_days = max(1, (date.fromisoformat(c['end_date']) - date.fromisoformat(c['start_date'])).days + 1)
-                    overlap_days = max(1, (date.fromisoformat(upper) - date.fromisoformat(lower)).days + 1)
-                    total_ad_spend += rounded(Decimal(c['cost']) * overlap_days / total_days)
+                s_dt = date.fromisoformat(c['start_date'])
+                e_dt = date.fromisoformat(c['end_date'])
+                total_days = max(1, (e_dt - s_dt).days + 1)
+                daily_rate = Decimal(c['cost']) / Decimal(total_days)
 
-    # All-time imported ad spend for coverage notice
-    all_ads_cost = db.execute('SELECT SUM(cost) FROM ads_product').fetchone()[0] or 0
-    if not all_ads_cost:
-        all_ads_cost = db.execute('SELECT SUM(cost) FROM ads_campaign').fetchone()[0] or 0
+                q_start = max(s_dt, date.fromisoformat(start))
+                q_end = min(e_dt, date.fromisoformat(end), date.fromisoformat(as_of))
+                camp_id = c['campaign_id']
+
+                curr = q_start
+                while curr <= q_end:
+                    daily_camp_alloc[(camp_id, curr.isoformat())] = daily_rate
+                    curr += timedelta(days=1)
+            total_ad_spend = rounded(sum(daily_camp_alloc.values()))
+
+    # True deduplicated all-time imported ad spend for coverage notice
+    all_product_rows = [dict(r) for r in db.execute('SELECT * FROM ads_product ORDER BY import_id ASC, fingerprint ASC')]
+    if all_product_rows:
+        all_daily_alloc = {}
+        for ad in all_product_rows:
+            s_dt = date.fromisoformat(ad['start_date'])
+            e_dt = date.fromisoformat(ad['end_date'])
+            total_days = max(1, (e_dt - s_dt).days + 1)
+            daily_rate = Decimal(ad['cost']) / Decimal(total_days)
+            k_sku = sku_key(ad['sku'])
+            camp_id = ad['campaign_id']
+            curr = s_dt
+            while curr <= e_dt:
+                all_daily_alloc[(k_sku, camp_id, curr.isoformat())] = daily_rate
+                curr += timedelta(days=1)
+        all_ads_cost = rounded(sum(all_daily_alloc.values()))
+    else:
+        all_camp_rows = [dict(r) for r in db.execute('SELECT * FROM ads_campaign ORDER BY import_id ASC, fingerprint ASC')]
+        all_daily_camp = {}
+        for c in all_camp_rows:
+            s_dt = date.fromisoformat(c['start_date'])
+            e_dt = date.fromisoformat(c['end_date'])
+            total_days = max(1, (e_dt - s_dt).days + 1)
+            daily_rate = Decimal(c['cost']) / Decimal(total_days)
+            camp_id = c['campaign_id']
+            curr = s_dt
+            while curr <= e_dt:
+                all_daily_camp[(camp_id, curr.isoformat())] = daily_rate
+                curr += timedelta(days=1)
+        all_ads_cost = rounded(sum(all_daily_camp.values()))
 
     # Separate service fees into:
     # 1. Advertising Invoices: billed to Seller Central balance for Amazon Ads (description contains 'advertising')
@@ -635,14 +691,30 @@ def report(db, start=None, end=None, as_of=None, mode='mature', sku=None, skus=N
 
     # Search terms wasted spend & winners
     wasted_search_terms = [
-        dict(r) for r in db.execute(
-            'SELECT search_term, campaign_name, clicks, cost, sales FROM ads_search_term WHERE cost > 0 AND sales = 0 ORDER BY cost DESC LIMIT 50'
-        )
+        dict(r) for r in db.execute('''
+            WITH latest_st AS (
+                SELECT search_term, campaign_name, clicks, cost, sales, roas,
+                       ROW_NUMBER() OVER (PARTITION BY search_term, campaign_id ORDER BY import_id DESC, end_date DESC) as rn
+                FROM ads_search_term
+            )
+            SELECT search_term, campaign_name, clicks, cost, sales
+            FROM latest_st
+            WHERE rn = 1 AND cost > 0 AND sales = 0
+            ORDER BY cost DESC LIMIT 50
+        ''')
     ]
     top_search_terms = [
-        dict(r) for r in db.execute(
-            'SELECT search_term, campaign_name, clicks, cost, sales, roas FROM ads_search_term WHERE sales > 0 ORDER BY roas DESC LIMIT 50'
-        )
+        dict(r) for r in db.execute('''
+            WITH latest_st AS (
+                SELECT search_term, campaign_name, clicks, cost, sales, roas,
+                       ROW_NUMBER() OVER (PARTITION BY search_term, campaign_id ORDER BY import_id DESC, end_date DESC) as rn
+                FROM ads_search_term
+            )
+            SELECT search_term, campaign_name, clicks, cost, sales, roas
+            FROM latest_st
+            WHERE rn = 1 AND sales > 0
+            ORDER BY roas DESC LIMIT 50
+        ''')
     ]
 
     # SKU performance table
