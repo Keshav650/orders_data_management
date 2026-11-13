@@ -290,6 +290,11 @@ class AmazonReconciliationTests(unittest.TestCase):
         o1 = next(o for o in rep1['orders'] if o['amazon_order_id'] == '402-3017814-3391500')
         self.assertEqual(o1['settlement'], 33514)
         self.assertEqual(o1['payment_count'], 2)
+        self.assertEqual(o1['payment_state'], 'Deferred in reserve')
+        self.assertTrue(o1['is_deferred'])
+        self.assertEqual(rep1['summary']['deferred'], 1)
+        self.assertEqual(rep1['summary']['recorded'], 0)
+        self.assertEqual(rep1['summary']['awaiting'], 1)
 
         # 3. Later report with same transactions Released under new payout settlement ID 28172139082
         csv_released = (
@@ -308,12 +313,17 @@ class AmazonReconciliationTests(unittest.TestCase):
             self.assertEqual(tr['status'], 'Released')
             self.assertEqual(tr['settlement_id'], '28172139082')
 
-        # Report must NOT double-count settlement
+        # Report must NOT double-count settlement and must now reflect Settlement recorded
         rep2 = report(self.db, mode='all')
         o2 = next(o for o in rep2['orders'] if o['amazon_order_id'] == '402-3017814-3391500')
         self.assertEqual(o2['settlement'], 33514)  # 400.04 - 64.90 = 335.14, not 670.28!
         self.assertEqual(o2['product_sales'], 36356)
         self.assertEqual(o2['payment_count'], 2)
+        self.assertEqual(o2['payment_state'], 'Settlement recorded')
+        self.assertFalse(o2['is_deferred'])
+        self.assertEqual(rep2['summary']['deferred'], 0)
+        self.assertEqual(rep2['summary']['recorded'], 1)
+        self.assertEqual(rep2['summary']['awaiting'], 0)
 
     def test_overlapping_ad_reports_not_duplicated(self):
         # 1. First report: 30 days (Oct 01 - Oct 30) for Campaign C1, SKU-A, cost = 30000 paise (1000 paise/day)
@@ -344,6 +354,36 @@ class AmazonReconciliationTests(unittest.TestCase):
         # Total = 17000 paise (NOT 11000 + 12000 = 23000!)
         rep2 = report(self.db, start='2026-10-10', end='2026-10-20', mode='custom')
         self.assertEqual(rep2['summary']['ads'], 17000)
+
+    def test_order_in_transit_with_deferred_transactions_not_settled(self):
+        # Shipped order in transit with Deferred transactions (DD+7 reserve policy)
+        self.db.execute(
+            "INSERT INTO orders(order_item_id, amazon_order_id, purchase_date, order_status, sku, quantity, item_price, raw) "
+            "VALUES ('it_transit', '402-0132836-1125929', '2026-11-08', 'Shipped - Picked Up', 'BS-KHC-4-ABC-Beige', 1, 39900, '{}')"
+        )
+        csv_trans = (
+            "settlement id,date/time,type,order id,sku,description,quantity,marketplace,account type,fulfillment,order city,order state,order postal,product sales,shipping credits,gift wrap credits,promotional rebates,Total sales tax liable(GST before adjusting TCS),TCS-CGST,TCS-SGST,TCS-IGST,TDS (Section 194-O),selling fees,fba fees,other transaction fees,other,total,Transaction Status\n"
+            "28265624872,2026-11-12 04:30:00,Order,402-0132836-1125929,BS-KHC-4-ABC-Beige,Curtain,1,amazon.in,Electronic,Merchant,KOLKATA,WEST BENGAL,700001,338.14,0,0,0,60.86,0,0,-1.69,0,0,0,-27.15,0,370.16,Deferred\n"
+            "28265624872,2026-11-12 04:30:00,Shipping Services,402-0132836-1125929,,Easy Ship weight handling fees,0,Amazon.in,Electronic,Merchant,,,,0,0,0,0,0,0,0,0,0,0,0,-64.90,0,-64.90,Deferred\n"
+        )
+        parsed = parse_file('transit_trans.csv', csv_trans.encode('utf-8'), kind='transactions')
+        commit_file(self.db, parsed)
+        self.db.commit()
+
+        rep = report(self.db, mode='all')
+        o = next(item for item in rep['orders'] if item['amazon_order_id'] == '402-0132836-1125929')
+
+        # Order must be marked as 'Deferred in reserve', NOT 'Settlement recorded'
+        self.assertEqual(o['payment_state'], 'Deferred in reserve')
+        self.assertTrue(o['is_deferred'])
+        self.assertEqual(o['settlement'], 30526)
+        self.assertEqual(o['status'], 'Shipped - Picked Up')
+
+        # Summary checks: must be counted under deferred and awaiting, NOT recorded as settled
+        self.assertEqual(rep['summary']['deferred'], 1)
+        self.assertEqual(rep['summary']['awaiting'], 1)
+        self.assertEqual(rep['summary']['recorded'], 0)
+        self.assertEqual(rep['summary']['deferred_settlement'], 30526)
 
 
 if __name__ == '__main__':

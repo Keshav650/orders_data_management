@@ -239,9 +239,9 @@ function renderDashboard() {
   $('#content').innerHTML = context() + alerts + adsAlert +
     `<div class="metric-grid">` +
     metric('Net Profit', s.net_profit === null ? 'Incomplete' : inr(s.net_profit), s.provisional ? 'Provisional · review costs' : 'After all costs & ads', 'all', true) +
-    metric('Net Settlement', inr(s.settlement), `${number(s.recorded)} orders settled`, 'recorded') +
+    metric('Net Settlement', inr(s.settlement), `${number(s.recorded)} orders settled${s.deferred ? ` · ${number(s.deferred)} deferred in reserve` : ''}`, 'recorded') +
     metric('Product & Packaging', inr(s.product_cost + s.packaging), incomplete ? 'Some costs missing' : 'For retained units', 'cost') +
-    metric('Awaiting settlement', number(s.awaiting), `${number(s.overdue)} overdue 14+ days`, 'awaiting') +
+    metric('Awaiting settlement', number(s.awaiting), `${s.deferred ? `${number(s.deferred)} in reserve · ` : ''}${number(s.overdue)} overdue`, 'awaiting') +
     `</div>` +
     `<div class="two-col">${panel('Settlement over time', 'Daily net settlement grouped by purchase date.', trend())}${panel('Your cash earnings, explained', 'Net settlement − ads − product cost − packaging', fin)}</div>` +
     `<div class="two-col">${panel('Orders overview', `${number(s.orders)} non-cancelled orders · ${number(s.cancelled)} cancelled excluded`, `<div class="stat-list">${states}</div><div class="cost-row" style="margin-top:20px"><span>Customer return rate</span><b>${s.customer_return_rate}%</b></div><div class="cost-row"><span>RTO rate</span><b>${s.rto_rate}%</b></div>`)}${panel('Top products by net profit', 'After product costs, packaging and attributed ad spend.', bars)}</div>` +
@@ -250,8 +250,9 @@ function renderDashboard() {
 
 function filteredOrders() {
   return data.orders.filter(o => {
-    if (currentPage === 'awaiting' && (o.payment_count || o.status === 'CANCELLED')) return false;
-    if (orderFilter === 'recorded' && (!o.payment_count || o.status === 'CANCELLED')) return false;
+    if (currentPage === 'awaiting' && (o.payment_state === 'Settlement recorded' || o.payment_state === 'Zero settlement' || o.payment_state === 'Negative settlement' || o.status === 'CANCELLED')) return false;
+    if (orderFilter === 'recorded' && (o.payment_state !== 'Settlement recorded' && o.payment_state !== 'Zero settlement' && o.payment_state !== 'Negative settlement')) return false;
+    if (orderFilter === 'deferred' && o.payment_state !== 'Deferred in reserve') return false;
     if (orderFilter === 'cost' && !o.costs_missing) return false;
     if (search && !(o.sku + ' ' + o.amazon_order_id + ' ' + (o.ship_city || '')).toLowerCase().includes(search.toLowerCase())) return false;
     if (statusFilter && o.status !== statusFilter) return false;
@@ -266,9 +267,12 @@ function renderOrders() {
   const intro = awaiting ?
     `<div class="mini-grid">` +
     `<div><span>Awaiting settlement</span><strong>${number(s.awaiting)}</strong></div>` +
-    `<div><span>Overdue (14+ days)</span><strong>${number(s.overdue)}</strong></div>` +
-    `<div><span>Within window</span><strong>${number(s.awaiting - s.overdue)}</strong></div>` +
-    `<div><span>Listed value</span><strong>${inr(s.listed_value)}</strong></div>` +
+    `<div class="interactive ${paymentFilter === 'Deferred in reserve' ? 'active' : ''}" data-filter-payment="Deferred in reserve" role="button" tabindex="0">` +
+    `<span>Deferred in reserve</span><strong class="warn">${number(s.deferred || 0)}</strong>` +
+    `<div class="details">${inr(s.deferred_settlement || 0)} pending delivery release</div>` +
+    `</div>` +
+    `<div><span>Overdue (14+ days)</span><strong class="${s.overdue ? 'negative' : ''}">${number(s.overdue)}</strong></div>` +
+    `<div><span>Within window</span><strong>${number(s.within_window || Math.max(0, s.awaiting - s.overdue - (s.deferred || 0)))}</strong></div>` +
     `</div>` : '';
 
   $('#content').innerHTML = context() + intro +
@@ -302,7 +306,7 @@ function renderOrderTable() {
       `<td class="nowrap">${fmtDate(o.purchase_date)}<div class="details">Due ${fmtDate(o.due_date)}</div></td>` +
       `<td>${o.quantity}</td>` +
       `<td>${badge(o.status)}</td>` +
-      `<td>${badge(o.payment_state)}<div class="details">${o.latest_trans_date ? fmtDate(o.latest_trans_date) : 'No settlement yet'}</div></td>` +
+      `<td>${badge(o.payment_state)}<div class="details">${o.is_deferred ? '<span style="color:#b45309">Pending delivery release</span>' : (o.latest_trans_date ? fmtDate(o.latest_trans_date) : 'No settlement yet')}</div></td>` +
       `<td class="num">${inr(o.settlement)}</td>` +
       `<td class="num">${o.product_cost === null ? '<strong class="missing-cost">Missing cost</strong>' : inr(o.product_cost)}</td>` +
       `<td class="num">${o.packaging === null ? '<strong class="missing-cost">Missing cost</strong>' : inr(o.packaging)}</td>` +
@@ -596,9 +600,16 @@ async function openOrder(id) {
   $('#dialog-title').textContent = 'Amazon Order ' + id;
 
   $('#dialog-content').innerHTML = (row ?
+    (row.payment_state === 'Deferred in reserve' ?
+      `<div class="notice warn" style="margin-bottom:14px">` +
+      `<strong>⚠️ Settlement Deferred in Amazon Reserve</strong><br>` +
+      `This order is in transit or within Amazon's delivery reserve period (DD+7 policy). ` +
+      `Amazon has provisionally calculated a net settlement of <strong>${inr(row.settlement)}</strong>, but these funds are currently <strong>deferred in reserve</strong> and have <strong>not yet been disbursed</strong> to your bank account. ` +
+      `Amazon will release them in an upcoming disbursement once customer delivery is confirmed.` +
+      `</div>` : '') +
     `<div class="mini-grid">` +
     `<div><span>SKU</span><strong>${escapeHTML(row.sku)}</strong></div>` +
-    `<div><span>Net Settlement</span><strong>${inr(row.settlement)}</strong></div>` +
+    `<div><span>Net Settlement</span><strong>${inr(row.settlement)}</strong>${row.is_deferred ? '<div class="details" style="color:#b45309">Deferred in reserve</div>' : ''}</div>` +
     `<div><span>Product Cost</span><strong>${inr(row.product_cost)}</strong></div>` +
     `<div><span>Contribution</span><strong class="${row.contribution < 0 ? 'negative' : 'positive'}">${inr(row.contribution)}</strong></div>` +
     `</div>` +
@@ -617,16 +628,17 @@ async function openOrder(id) {
         `</tr>`).join('')}</tbody></table></div>` : '') +
     `<h3>Settlement transactions</h3>` +
     `<div class="table-wrap"><table>` +
-    `<thead><tr><th>Date</th><th>Type</th><th>Description</th><th class="num">Sales</th><th class="num">Easy Ship</th><th class="num">Fees</th><th class="num">Total</th></tr></thead>` +
+    `<thead><tr><th>Date</th><th>Type</th><th>Status</th><th>Description</th><th class="num">Sales</th><th class="num">Easy Ship</th><th class="num">Fees</th><th class="num">Total</th></tr></thead>` +
     `<tbody>${detail.transactions.map(t => `<tr>` +
       `<td class="nowrap">${fmtDate(t.post_date)}</td>` +
       `<td>${badge(t.type)}</td>` +
+      `<td>${t.status === 'Released' ? '<span class="badge green">Released</span>' : (t.status === 'Deferred' ? '<span class="badge warn">Deferred (Reserve)</span>' : badge(t.status || 'Settled'))}${t.release_date ? `<div class="details">Released: ${fmtDate(t.release_date)}</div>` : (t.status === 'Deferred' ? '<div class="details" style="color:#b45309">Pending delivery</div>' : '')}</td>` +
       `<td>${escapeHTML(t.description)}</td>` +
       `<td class="num">${inr(t.product_sales)}</td>` +
       `<td class="num negative">${inr(t.other_fees)}</td>` +
       `<td class="num negative">${inr(t.selling_fees)}</td>` +
       `<td class="num"><strong>${inr(t.total)}</strong></td>` +
-      `</tr>`).join('') || '<tr><td colspan="7">No settlement records yet.</td></tr>'}` +
+      `</tr>`).join('') || '<tr><td colspan="8">No settlement records yet.</td></tr>'}` +
     `</tbody></table></div>` +
     (detail.returns && detail.returns.length > 0 ?
       `<h3>Return logistics & tracking</h3>` +
@@ -701,6 +713,12 @@ document.addEventListener('click', e => run(async () => {
     renderReturns();
   }
   if (b.id === 'clear-order-filter') { orderFilter = ''; renderOrders(); }
+  if (b.dataset.filterPayment) {
+    const f = b.dataset.filterPayment;
+    paymentFilter = (paymentFilter === f) ? '' : f;
+    tablePage = 0;
+    renderOrders();
+  }
   if (b.dataset.drill) {
     if (b.dataset.drill === 'awaiting') await navigate('awaiting');
     else if (b.dataset.drill === 'ads') await navigate('reconciliation');

@@ -102,7 +102,7 @@ def make_server(db_path, port=8775, host='127.0.0.1'):
                         writer = csv.DictWriter(out, fieldnames=fields)
                         writer.writeheader()
                         for row in result['orders']:
-                            if query.get('awaiting') == 'true' and (row['payment_count'] or row['status'] == 'CANCELLED'):
+                            if query.get('awaiting') == 'true' and (row['payment_state'] in ('Settlement recorded', 'Zero settlement', 'Negative settlement') or row['status'] == 'CANCELLED'):
                                 continue
                             clean = {}
                             for k in fields:

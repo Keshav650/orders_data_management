@@ -396,6 +396,12 @@ def report(db, start=None, end=None, as_of=None, mode='mature', sku=None, skus=N
                 it_tcs_tds.append(tt)
                 it_contributions.append(contr)
 
+        released_trans = [t for t in trans_list if t.get('status') == 'Released']
+        deferred_trans = [t for t in trans_list if t.get('status') == 'Deferred']
+        has_released = bool(released_trans)
+        has_deferred = bool(deferred_trans)
+        is_only_deferred = bool(trans_list and not has_released and has_deferred)
+
         # Update SKU totals (for Product Performance tab)
         for i, it in enumerate(items):
             k = sku_key(it['sku'])
@@ -408,14 +414,17 @@ def report(db, start=None, end=None, as_of=None, mode='mature', sku=None, skus=N
             s_acc['contribution'] += it_contributions[i]
             s_acc['returns'] += (final_status == 'RETURN')
             s_acc['rto'] += (final_status == 'RTO')
-            s_acc['awaiting'] += (not trans_list)
-            s_acc['provisional'] += bool(item_costs[i] is None or order_packaging is None or not trans_list)
+            s_acc['awaiting'] += bool(not trans_list or is_only_deferred)
+            s_acc['deferred'] += bool(is_only_deferred)
+            s_acc['provisional'] += bool(item_costs[i] is None or order_packaging is None or not trans_list or is_only_deferred)
 
         due_date = (date.fromisoformat(items[0]['purchase_date']) + timedelta(days=cutoff_days)).isoformat()
-        if trans_list:
-            payment_state = 'Settlement recorded' if settlement_paise > 0 else ('Zero settlement' if settlement_paise == 0 else 'Negative settlement')
-        elif is_cancelled:
+        if is_cancelled:
             payment_state = 'Cancelled / Excluded'
+        elif is_only_deferred:
+            payment_state = 'Deferred in reserve'
+        elif trans_list:
+            payment_state = 'Settlement recorded' if settlement_paise > 0 else ('Zero settlement' if settlement_paise == 0 else 'Negative settlement')
         elif due_date <= as_of:
             payment_state = 'Awaiting payment (overdue)'
         else:
@@ -457,6 +466,10 @@ def report(db, start=None, end=None, as_of=None, mode='mature', sku=None, skus=N
             'raw_status': raw_status,
             'payment_state': payment_state,
             'payment_count': len(trans_list),
+            'released_count': len(released_trans),
+            'deferred_count': len(deferred_trans),
+            'is_deferred': is_only_deferred,
+            'deferred_settlement': order_row_settlement if is_only_deferred else 0,
             'latest_trans_date': max((t['post_date'] for t in trans_list), default=None),
             'settlement': order_row_settlement,
             'listed_value': order_row_listed,
@@ -525,9 +538,12 @@ def report(db, start=None, end=None, as_of=None, mode='mature', sku=None, skus=N
             totals['listed_value'] += order_row_listed
             totals['missing_cost'] += bool(order_costs_missing and order_row_product_cost is None)
             totals['missing_packaging'] += bool(order_packaging is None)
-            totals['awaiting'] += not trans_list
-            totals['overdue'] += not trans_list and due_date <= as_of
-            totals['recorded'] += bool(trans_list)
+            totals['deferred'] += bool(is_only_deferred)
+            totals['deferred_settlement'] += (order_row_settlement if is_only_deferred else 0)
+            totals['awaiting'] += bool(not trans_list or is_only_deferred)
+            totals['overdue'] += bool(not trans_list and due_date <= as_of)
+            totals['within_window'] += bool(not trans_list and due_date > as_of)
+            totals['recorded'] += bool(trans_list and has_released)
 
             # Timeline
             t_day = timeline[items[0]['purchase_date']]
@@ -681,7 +697,10 @@ def report(db, start=None, end=None, as_of=None, mode='mature', sku=None, skus=N
         'missing_cost': totals['missing_cost'],
         'missing_packaging': totals['missing_packaging'],
         'awaiting': totals['awaiting'],
+        'deferred': totals['deferred'],
+        'deferred_settlement': totals['deferred_settlement'],
         'overdue': totals['overdue'],
+        'within_window': totals['within_window'],
         'recorded': totals['recorded'],
         'listed_value': totals['listed_value'],
         'provisional': bool(totals['missing_cost'] or totals['missing_packaging'] or totals['awaiting'] or len(issues) > 0),
