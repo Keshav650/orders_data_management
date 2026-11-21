@@ -5,6 +5,7 @@ import io
 import json
 import os
 import sqlite3
+import sys
 import tempfile
 import threading
 import time
@@ -35,17 +36,20 @@ def make_server(db_path, port=8775, host='127.0.0.1'):
             self.connection.settimeout(60)
 
         def send(self, value, code=200, content_type='application/json; charset=utf-8', filename=None):
-            data = json.dumps(value, default=str).encode() if isinstance(value, (dict, list)) else value
-            self.send_response(code)
-            self.send_header('Content-Type', content_type)
-            self.send_header('Content-Length', str(len(data)))
-            self.send_header('Cache-Control', 'no-store')
-            self.send_header('X-Content-Type-Options', 'nosniff')
-            self.send_header('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'")
-            if filename:
-                self.send_header('Content-Disposition', f'attachment; filename="{filename}"')
-            self.end_headers()
-            self.wfile.write(data)
+            try:
+                data = json.dumps(value, default=str).encode() if isinstance(value, (dict, list)) else value
+                self.send_response(code)
+                self.send_header('Content-Type', content_type)
+                self.send_header('Content-Length', str(len(data)))
+                self.send_header('Cache-Control', 'no-store')
+                self.send_header('X-Content-Type-Options', 'nosniff')
+                self.send_header('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'")
+                if filename:
+                    self.send_header('Content-Disposition', f'attachment; filename="{filename}"')
+                self.end_headers()
+                self.wfile.write(data)
+            except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
+                pass
 
         def do_GET(self):
             try:
@@ -123,6 +127,8 @@ def make_server(db_path, port=8775, host='127.0.0.1'):
                         self.send((ROOT / 'static' / filename).read_bytes(), content_type=mime + '; charset=utf-8')
                     else:
                         self.send({'error': 'Not found'}, 404)
+            except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
+                pass
             except (ValueError, KeyError) as exc:
                 self.send({'error': str(exc)}, 400)
             except Exception:
@@ -210,6 +216,8 @@ def make_server(db_path, port=8775, host='127.0.0.1'):
 
                     else:
                         self.send({'error': 'Not found'}, 404)
+            except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
+                pass
             except (ValueError, KeyError, TypeError) as exc:
                 self.send({'error': str(exc)}, 400)
             except Exception:
@@ -217,7 +225,16 @@ def make_server(db_path, port=8775, host='127.0.0.1'):
                 traceback.print_exc()
                 self.send({'error': 'Request failed.'}, 500)
 
-    return ThreadingHTTPServer((host, port), Handler)
+    class SafeThreadingHTTPServer(ThreadingHTTPServer):
+        daemon_threads = True
+
+        def handle_error(self, request, client_address):
+            _, exc, _ = sys.exc_info()
+            if isinstance(exc, (ConnectionResetError, ConnectionAbortedError, BrokenPipeError)):
+                return
+            super().handle_error(request, client_address)
+
+    return SafeThreadingHTTPServer((host, port), Handler)
 
 
 if __name__ == '__main__':

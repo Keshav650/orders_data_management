@@ -105,11 +105,15 @@ def report(db, start=None, end=None, as_of=None, mode='mature', sku=None, skus=N
     
     earliest_order, latest_order = db.execute('SELECT MIN(purchase_date), MAX(purchase_date) FROM orders').fetchone()
     
-    if mode == 'mature':
+    if mode == 'all':
+        start = day(start) if start else (earliest_order or (date.fromisoformat(day(as_of)) - timedelta(days=29)).isoformat())
+        end = day(end) if end else (latest_order or day(as_of))
+    elif mode == 'mature':
         end = min(cutoff, latest_order or cutoff)
+        start = day(start) if start else (date.fromisoformat(end) - timedelta(days=29)).isoformat()
     else:
         end = day(end or as_of)
-    start = day(start) if start else (date.fromisoformat(end) - timedelta(days=29)).isoformat()
+        start = day(start) if start else (date.fromisoformat(end) - timedelta(days=29)).isoformat()
     
     if start > end and mode != 'mature':
         raise ValueError('Start date cannot be after end date')
